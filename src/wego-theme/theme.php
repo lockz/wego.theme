@@ -114,26 +114,12 @@ class Theme
 	*/
 	public $images = array(
 		/*
-		'thumbnail' => array(
-			'width'  => 100,
-			'height' => 100,
-			'crop'   => true,
-		),
-		'medium' => array(
-			'width'  => 200,
-			'height' => 200,
-			'crop'   => true,
-		),
-		'large' => array(
-			'width'  => 400,
-			'height' => 400,
-			'crop'   => true,
-		),
-		'custom-size' => array(
-			'width'  => 640,
-			'height' => 480,
-			'crop'   => true, // array('left', 'top')
-			'title'  => 'My custom image',
+		'$blogslug_<thumbnail>' => array(
+			'width'     => 100, // Ширина в пикселя
+			'height'    => 100, // Высота в пикселя
+			'crop'      => true, // Обрезка изображения, можно использовать array('left', 'top') см. кодекс (по умолчнию true - срезать по центру)
+			'blog_slug' => '', // Слаг блога (по умолчанию пусто для всех сайтов с дочерней темой)
+			'title'     => '', // Название изображения в админке для произвольного изображения
 		),
 		*/
 	);
@@ -177,6 +163,7 @@ class Theme
 			'name'        => 'Секции',
 			'id'          => 'sections',
 			'description' => 'Секции сайта.',
+			'blog_slug'   => 'Слаг блога',
 		),
 		*/
 	);
@@ -248,6 +235,7 @@ class Theme
 			'version'    => '1.0.0', // Версия файла (по умолчанию 1.0.0)
 			'in_footer'  => true, // Подключать в футере (по умолчанию true для js, false для css)
 			'target'     => 'backend, frontend, all', // Где подключать файлы (по умолчанию all)
+			'force_type' => 'js, css' // Тип файла (если не удалось определить автоматически)
 		),
 		*/
 	);
@@ -368,6 +356,11 @@ class Theme
 		if ($this->images) {
 			add_action('after_setup_theme'      , array($this, 'images_setup'));
 			add_filter('image_size_names_choose', array($this, 'images_admin_choose'));
+		}
+
+		// Поддержка миниатюр для записей
+		if ($this->thumbnails) {
+			add_action('after_setup_theme', array($this, 'thumbnails_support'));
 		}
 
 		// Стандартное изображение
@@ -549,10 +542,15 @@ class Theme
 			}
 
 			// URI к файлу
-			if ($args['path'][0] != '/') {
-				$args['path'] = '/' . $args['path'];
+			if (preg_match('/^http/', $args['path'])) {
+				$target_uri = $args['path'];
+			} else {
+				if ($args['path'][0] != '/') {
+					$args['path'] = '/' . $args['path'];
+				}
+
+				$target_uri = $uri . $args['path'];
 			}
-			$uri = $uri . $args['path'];
 
 			// Проскок не тех хуков
 			if (($action == 'wp_enqueue_scripts') && ($args['target'] != 'all') && ($args['target'] != 'frontend')) {
@@ -564,13 +562,17 @@ class Theme
 			$ext = pathinfo($args['path'], PATHINFO_EXTENSION);
 			$filename = pathinfo($args['path'], PATHINFO_FILENAME);
 
+			if (!$ext && isset($args['force_type'])) {
+				$ext = $args['force_type'];
+			}
+
 			if ($ext == 'js') {
 				if (!isset($args['in_footer'])) {
 					$args['in_footer'] = true;
 				}
 
 				if ($filename != 'wp') {
-					$result = wp_register_script($args['name'], $uri, $args['dependency'], $args['version'], $args['in_footer']);
+					$result = wp_register_script($args['name'], $target_uri, $args['dependency'], $args['version'], $args['in_footer']);
 
 					if (!$result && $this->debug) {
 						$message = sprintf('Не удалось зарегистрировать скрипт "%s".', $args['name']);
@@ -585,7 +587,7 @@ class Theme
 				}
 
 				if ($filename != 'wp') {
-					$result = wp_register_style($args['name'], $uri, $args['dependency'], $args['version'], $args['in_footer']);
+					$result = wp_register_style($args['name'], $target_uri, $args['dependency'], $args['version'], $args['in_footer']);
 
 					if (!$result && $this->debug) {
 						$message = sprintf('Не удалось зарегистрировать стиль "%s".', $args['name']);
@@ -696,8 +698,39 @@ class Theme
 	*/
 	public function images_setup()
 	{
-		// Регистрация изображений и их параметров
+		// Получение слага текущего сайта
+		$current_blog_slug = Mtools::get_blog_slug();
+
 		foreach ($this->images as $size => $args) {
+			// Проверка размеров
+			$args['width'] = intval($args['width']);
+			$args['height'] = intval($args['height']);
+
+			if (empty($args['width']) || empty($args['height'])) {
+				if ($this->debug) {
+					$message = sprintf('Высота или ширина изображения "%s" не задана.', $size);
+					wp_die($message, __FUNCTION__);
+				} else {
+					continue;
+				}
+			}
+
+			// Стандартные параметры
+			$args = wp_parse_args($args, array(
+				'crop'      => true,
+				'blog_slug' => '',
+			));
+
+			// Пропуск не того блога
+			if ($args['blog_slug']) {
+				if ($args['blog_slug'] != $current_blog_slug) {
+					continue;
+				}
+
+				$size = str_replace($args['blog_slug'] . '_', '', $size);
+			}
+
+			// Настройка встроенных изображений
 			if (in_array($size, $this->_reserved_images)) {
 				$width  = get_option($size . '_size_w');
 				$height = get_option($size . '_size_h');
@@ -715,11 +748,6 @@ class Theme
 			} else {
 				add_image_size($size, $args['width'], $args['height'], $args['crop']);
 			}
-		}
-
-		// Включение поддержки миниатюр
-		if (!empty($this->thumbnails)) {
-			add_theme_support('post-thumbnails', $this->thumbnails);
 		}
 	}
 
@@ -1046,11 +1074,22 @@ class Theme
 			'after_widget'  => '',
 			'before_title'  => '',
 			'after_title'   => '',
+			'blog_slug'     => '',
 		);
+
+		// Для мультисайт регистрации зон
+		$current_blog_slug = Mtools::get_blog_slug();
 
 		foreach ($this->sidebars as $sidebar) {
 			$args = wp_parse_args($sidebar, $defaults);
-			register_sidebar($args);
+
+			if ($args['blog_slug']) {
+				if ($args['blog_slug'] == $current_blog_slug) {
+					register_sidebar($args);
+				}
+			} else {
+				register_sidebar($args);
+			}
 		}
 	}
 
@@ -1212,6 +1251,16 @@ class Theme
 		}
 
 		return $styles;
+	}
+
+
+	/**
+	*	Подключение поддержки миниатюр.
+	*	@return void.
+	*/
+	public function thumbnails_support()
+	{
+		add_theme_support('post-thumbnails', $this->thumbnails);
 	}
 
 
